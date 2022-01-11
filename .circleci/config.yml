@@ -38,7 +38,7 @@ workflows:
           context: default
           filters: 
             branches:
-              only: main
+              only: master
 
   workflow-nightly:
     jobs:
@@ -49,4 +49,4 @@ workflows:
           cron: "0 3 * * *"
           filters:
             branches:
-              only: main
+              only: master

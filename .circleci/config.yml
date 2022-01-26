@@ -2,6 +2,7 @@ version: 2.1
 executors:
   executor-docker:
     environment:
+      FROM_TAG: "3.14"
       ORG_NAME: jonbackhaus
       IMAGE_NAME: bliss
     docker:
@@ -10,6 +11,16 @@ executors:
 
 jobs:
   job-build-image:
+    description: generic Docker image builder
+    parameters:
+      dockerfile:
+        description: filename for Docker build file (Dockerfile)
+        default: "Dockerfile"
+        type: string
+      build_context:
+        description: build path (context)
+        default: "."
+        type: string
     executor: executor-docker
     steps:
       - checkout
@@ -18,35 +29,116 @@ jobs:
       - run:
           name: build image
           command: |
-            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
             IMAGE_URI=$ORG_NAME/$IMAGE_NAME; echo "IMAGE_URI=$IMAGE_URI"
-            docker build -t $IMAGE_URI -f Dockerfile .
-            COMMIT_SLUG=${CIRCLE_SHA1:0:7}; echo "COMMIT_SLUG=$COMMIT_SLUG"
-            docker tag $IMAGE_URI $IMAGE_URI:latest
-            docker tag $IMAGE_URI $IMAGE_URI:$CIRCLE_BRANCH
-            docker tag $IMAGE_URI $IMAGE_URI:$CIRCLE_BRANCH-$COMMIT_SLUG
-            docker push $IMAGE_URI:latest
-            docker push $IMAGE_URI:$CIRCLE_BRANCH
-            docker push $IMAGE_URI:$CIRCLE_BRANCH-$COMMIT_SLUG
+            docker build --build-arg FROM_TAG=$FROM_TAG -t $IMAGE_URI -f << parameters.dockerfile >> << parameters.build_context >>
+            docker save -o image.tar $IMAGE_URI
+      - persist_to_workspace:
+          root: .
+          paths:
+            - "image.tar"
+
+  job-push-image:
+    description: push image to repo
+    parallelism: 1
+    parameters:
+      image_tag:
+        description: tag for Docker image
+        default: "latest"
+        type: string
+    executor: executor-docker
+    steps:
+      - setup_remote_docker:
+          version: 19.03.13
+      - attach_workspace:
+          at: .
+      - run:
+          name: push image
+          command: |
+            IMAGE_URI=$ORG_NAME/$IMAGE_NAME; echo "IMAGE_URI=$IMAGE_URI"
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+            docker load -i image.tar
+            docker tag $IMAGE_URI $IMAGE_URI:<< parameters.image_tag >>
+            docker push $IMAGE_URI:<< parameters.image_tag >>
+   
 
 
 workflows:
   version: 2
-  workflow-commit:
+  workflow-mainline:
     jobs:
       - job-build-image:
-          context: default
           filters: 
             branches:
-              only: master
+              only: main
+      - job-push-image:
+          context: default
+          requires:
+            - "job-build-image"
+          matrix:
+            parameters:
+              image_tag:
+                - "latest"
 
-  workflow-nightly:
+  workflow-branch:
     jobs:
       - job-build-image:
+          filters: 
+            branches:
+              only: /.*/ # build all branches
+      - job-push-image:
           context: default
+          requires:
+            - "job-build-image"
+          matrix:
+            parameters:
+              image_tag:
+                - "<< pipeline.git.branch >>"
+                - "<< pipeline.git.branch >>-<< pipeline.git.revision >>"
+                - "<< pipeline.git.branch >>-<< pipeline.git.revision >>-<< pipeline.number >>"
+
+  workflow-release:
+    jobs:
+      - job-build-image:
+          filters: 
+            tags:
+              only: /.*/ # build all tags
+            branches:
+              ignore: /.*/ # ignore all branches
+      - job-push-image:
+          context: default
+          requires:
+            - "job-build-image"
+          filters: 
+            tags:
+              only: /.*/ # build all tags
+            branches:
+              ignore: /.*/ # ignore all branches
+          matrix:
+            parameters:
+              image_tag:
+                - "release"
+                - "<< pipeline.git.tag >>"
+                - "<< pipeline.git.tag >>-<< pipeline.git.revision >>"
+                - "<< pipeline.git.tag >>-<< pipeline.git.revision >>-<< pipeline.number >>"
+
+  workflow-nightly:
     triggers:
       - schedule:
           cron: "0 3 * * *"
           filters:
             branches:
-              only: master
+              only: main
+    jobs:
+      - job-build-image
+      - job-push-image:
+          context: default
+          requires:
+            - "job-build-image"
+          matrix:
+            parameters:
+              image_tag:
+                - "latest"
+                - "nightly"
+                - "<< pipeline.git.branch >>"
+                - "<< pipeline.git.branch >>-<< pipeline.git.revision >>"
+                - "<< pipeline.git.branch >>-<< pipeline.git.revision >>-<< pipeline.number >>"
